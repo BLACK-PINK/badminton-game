@@ -58,7 +58,7 @@ document.querySelectorAll('#pad button').forEach(b => {
 cv.addEventListener('pointerdown', () => { press.Space = true; });
 
 // ---- 상수 ----
-const G = 9.8, HALF_W = 2.59, HALF_L = 6.7, NET_H = 1.55, WIN = 11;
+const G = 9.8, HALF_W = 2.59, HALF_L = 6.7, NET_H = 1.55, WIN = 5;
 const P = { x: 0, z: 5.2, swing: 0, cool: 0 };      // 플레이어 (카메라 쪽, +z)
 const A = { x: 0, z: -5.2, swing: 0, cool: 0, tx: 0, tz: -5 }; // AI
 const S = { x: 0, y: 1, z: 0, vx: 0, vy: 0, vz: 0, last: 0, fault: false, crossed: false, trail: [] };
@@ -79,13 +79,12 @@ function holdShuttle() {
 // ---- 샷 ----
 // side: 1=플레이어(+z), -1=AI. 목표지점으로 날아가는 포물선 계산(네트 통과 보장 옵션)
 function launch(side, type, tx, tz) {
-  const T0 = { clear: 1.5, drop: 1.0, smash: 0.5, serve: 1.3 }[type];
+  const T0 = { clear: side === 1 ? 1.7 : 1.9, drop: 1.2, smash: 0.8, serve: 1.5 }[type];
   const sx = S.x, sy = Math.max(S.y, 0.3), sz = S.z;
   let T = T0, vx, vy, vz;
   for (let i = 0; i < 20; i++) {
     vx = (tx - sx) / T; vz = (tz - sz) / T; vy = -sy / T + 0.5 * G * T;
-    if (type === 'smash') break;
-    const tn = (0 - sz) / vz; // 네트 도달 시간
+        const tn = (0 - sz) / vz; // 네트 도달 시간
     const yn = sy + vy * tn - 0.5 * G * tn * tn;
     if (tn <= 0 || yn > NET_H + 0.35) break;
     T += 0.08;
@@ -102,11 +101,10 @@ function playerHit() {
   launch(1, type, tx, tz);
 }
 function aiHit() {
-  const err = () => (Math.random() - 0.5) * 1.4;
+  const err = () => (Math.random() - 0.5) * 4;
   let type = 'clear';
   const r = Math.random();
-  if (S.y > 2.4 && r < 0.4) type = 'smash';
-  else if (r < 0.3) type = 'drop';
+  if (r < 0.1) type = 'drop';
   const tx = Math.max(-2.3, Math.min(2.3, (P.x > 0 ? -1 : 1) * (0.8 + Math.random() * 1.5) + err() * 0.3));
   const tz = type === 'drop' ? 1.6 + Math.random() : type === 'smash' ? 3.6 + Math.random() * 1.2 : 5.2 + Math.random() * 1.2;
   launch(-1, type, tx, tz + err() * 0.3);
@@ -138,7 +136,7 @@ function update(dt) {
   if (state === 'point') { if (stateT > 1.6) resetServe(); }
 
   // 플레이어 이동
-  const sp = 5.2;
+  const sp = 6.5;
   const mx = (keys.ArrowRight || keys.KeyD ? 1 : 0) - (keys.ArrowLeft || keys.KeyA ? 1 : 0);
   const mz = (keys.ArrowDown || keys.KeyS ? 1 : 0) - (keys.ArrowUp || keys.KeyW ? 1 : 0);
   P.x = Math.max(-HALF_W - 0.4, Math.min(HALF_W + 0.4, P.x + mx * sp * dt));
@@ -160,16 +158,16 @@ function update(dt) {
     if (state === 'rally') {
       // 플레이어 스윙
       if (swingKey && P.cool <= 0) {
-        P.swing = 1; P.cool = 0.35;
+        P.swing = 1; P.cool = 0.25;
         const d = Math.hypot(S.x - (P.x + 0.3), S.y - 1.5, S.z - P.z);
-        if (d < 1.9 && S.last === -1) playerHit();
+        if (d < 2.8 && S.last === -1) playerHit();
       }
       // AI
       aiMove(dt);
       if (S.last === 1 && S.vz < 0 || S.z < 0) {
         if (A.cool <= 0 && S.last === 1 && S.crossed) {
           const d = Math.hypot(S.x - (A.x + 0.3), S.y - 1.5, S.z - A.z);
-          if (d < 1.7 && Math.random() < 0.92) { A.swing = 1; A.cool = 0.5; aiHit(); }
+          if (d < 1.2 && Math.random() < 0.6) { A.swing = 1; A.cool = 0.5; aiHit(); }
         }
       }
     }
@@ -199,7 +197,7 @@ function update(dt) {
   }
 }
 function aiMove(dt) {
-  let gx = 0, gz = -4.5, sp = 4.3;
+  let gx = 0, gz = -4.5, sp = 2.2;
   if (state === 'rally' && S.last === 1) {
     const p = predict(1.4);
     gx = p.x; gz = Math.max(-6.2, Math.min(-0.9, p.z));
