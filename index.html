@@ -58,7 +58,7 @@ document.querySelectorAll('#pad button').forEach(b => {
 cv.addEventListener('pointerdown', () => { press.Space = true; });
 
 // ---- 상수 ----
-const G = 9.8, HALF_W = 2.59, HALF_L = 6.7, NET_H = 1.55, WIN = 5;
+const G = 9.8, HALF_W = 2.59, HALF_L = 6.7, NET_H = 1.55, WIN = 3;
 const P = { x: 0, z: 5.2, swing: 0, cool: 0 };      // 플레이어 (카메라 쪽, +z)
 const A = { x: 0, z: -5.2, swing: 0, cool: 0, tx: 0, tz: -5 }; // AI
 const S = { x: 0, y: 1, z: 0, vx: 0, vy: 0, vz: 0, last: 0, fault: false, crossed: false, trail: [] };
@@ -157,17 +157,17 @@ function update(dt) {
   if (state === 'rally' || state === 'point') {
     if (state === 'rally') {
       // 플레이어 스윙
-      if (swingKey && P.cool <= 0) {
+      if ((swingKey || autoHit()) && P.cool <= 0) {
         P.swing = 1; P.cool = 0.25;
         const d = Math.hypot(S.x - (P.x + 0.3), S.y - 1.5, S.z - P.z);
-        if (d < 2.8 && S.last === -1) playerHit();
+        if (d < 3.5 && S.last === -1) playerHit();
       }
       // AI
       aiMove(dt);
       if (S.last === 1 && S.vz < 0 || S.z < 0) {
         if (A.cool <= 0 && S.last === 1 && S.crossed) {
           const d = Math.hypot(S.x - (A.x + 0.3), S.y - 1.5, S.z - A.z);
-          if (d < 1.2 && Math.random() < 0.6) { A.swing = 1; A.cool = 0.5; aiHit(); }
+          if (d < 0.9 && Math.random() < 0.3) { A.swing = 1; A.cool = 0.5; aiHit(); }
         }
       }
     }
@@ -196,8 +196,11 @@ function update(dt) {
     }
   }
 }
+function autoHit() {
+  return S.last === -1 && Math.hypot(S.x - (P.x + 0.3), S.y - 1.5, S.z - P.z) < 2.2;
+}
 function aiMove(dt) {
-  let gx = 0, gz = -4.5, sp = 2.2;
+  let gx = 0, gz = -4.5, sp = 1.3;
   if (state === 'rally' && S.last === 1) {
     const p = predict(1.4);
     gx = p.x; gz = Math.max(-6.2, Math.min(-0.9, p.z));
@@ -319,7 +322,7 @@ function draw() {
   ctx.fillText(`나 ${score.p}  :  ${score.a} AI`, W / 2, 10 + H * 0.058);
   ctx.font = H * 0.025 + 'px system-ui'; ctx.fillStyle = '#ddd';
   ctx.fillText(`${WIN}점 선취`, W / 2, 10 + H * 0.105);
-  if (state === 'serve' && server === 1) banner('스페이스 / 클리어 버튼으로 서브!');
+  if (state === 'serve' && server === 1) banner('스페이스(터치: 클리어 버튼)로 서브! 공이 오면 자동으로 쳐줘요');
   if (state === 'point') banner(msg);
   if (state === 'title') overlay('🏸 배드민턴 3D', '이동: 방향키/WASD  ·  Space 클리어 · Q 드롭 · E 스매시\n셔틀이 가까울 때 누르세요 (좌/우 키로 방향 조절)\n\nSpace 또는 화면 터치로 시작');
   if (state === 'over') overlay(msg, `${score.p} : ${score.a}\nSpace 또는 터치로 다시 시작`);
