@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>🏸 Badminton 3D</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;overflow:hidden;font-family:system-ui,sans-serif;touch-action:none}
+  canvas{display:block;width:100vw;height:100vh}
+  #pad{position:fixed;bottom:12px;left:0;right:0;display:none;justify-content:space-between;padding:0 14px;pointer-events:none}
+  #pad div{display:grid;gap:8px;pointer-events:auto}
+  #dpad{grid-template-columns:repeat(3,56px)}
+  #acts{grid-template-columns:repeat(1,84px)}
+  #pad button{height:56px;border-radius:14px;border:0;background:rgba(255,255,255,.28);color:#fff;font-size:20px;font-weight:700}
+  #pad button:active{background:rgba(255,255,255,.55)}
+  @media (pointer:coarse){#pad{display:flex}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="pad">
+  <div id="dpad">
+    <span></span><button data-k="up">▲</button><span></span>
+    <button data-k="left">◀</button><button data-k="down">▼</button><button data-k="right">▶</button>
+  </div>
+  <div id="acts">
+    <button data-k="smash">스매시</button>
+    <button data-k="drop">드롭</button>
+    <button data-k="clear">클리어</button>
+  </div>
+</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, F;
+function resize() {
+  const d = Math.min(devicePixelRatio || 1, 2);
+  W = cv.width = innerWidth * d; H = cv.height = innerHeight * d; F = Math.min(H * 1.05, W * 0.9);
+}
+addEventListener('resize', resize); resize();
+
+// ---- 입력 ----
+const keys = {};
+const press = {}; // 이번 프레임 눌림
+addEventListener('keydown', e => {
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+  if (!keys[e.code]) press[e.code] = true;
+  keys[e.code] = true;
+});
+addEventListener('keyup', e => keys[e.code] = false);
+const padMap = { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', clear: 'Space', drop: 'KeyQ', smash: 'KeyE' };
+document.querySelectorAll('#pad button').forEach(b => {
+  const code = padMap[b.dataset.k];
+  const on = e => { e.preventDefault(); if (!keys[code]) press[code] = true; keys[code] = true; };
+  const off = e => { e.preventDefault(); keys[code] = false; };
+  b.addEventListener('pointerdown', on); b.addEventListener('pointerup', off);
+  b.addEventListener('pointerleave', off); b.addEventListener('pointercancel', off);
+});
+cv.addEventListener('pointerdown', () => { press.Space = true; });
+
+// ---- 상수 ----
+const G = 9.8, HALF_W = 2.59, HALF_L = 6.7, NET_H = 1.55, WIN = 11;
+const P = { x: 0, z: 5.2, swing: 0, cool: 0 };      // 플레이어 (카메라 쪽, +z)
+const A = { x: 0, z: -5.2, swing: 0, cool: 0, tx: 0, tz: -5 }; // AI
+const S = { x: 0, y: 1, z: 0, vx: 0, vy: 0, vz: 0, last: 0, fault: false, crossed: false, trail: [] };
+let state = 'title', server = 1, score = { p: 0, a: 0 }, msg = '', msgT = 0, stateT = 0, shake = 0;
+
+function resetServe() {
+  state = 'serve'; stateT = 0;
+  P.x = server === 1 ? 1.3 : 0; P.z = 5.2; A.x = server === -1 ? -1.3 : 0; A.z = -5.2;
+  S.vx = S.vy = S.vz = 0; S.trail = []; S.fault = false; S.crossed = false;
+  S.last = server; // 서버가 마지막 타자
+  holdShuttle();
+}
+function holdShuttle() {
+  const o = server === 1 ? P : A;
+  S.x = o.x + 0.35; S.y = 1.0; S.z = o.z + (server === 1 ? -0.4 : 0.4);
+}
+
+// ---- 샷 ----
+// side: 1=플레이어(+z), -1=AI. 목표지점으로 날아가는 포물선 계산(네트 통과 보장 옵션)
+function launch(side, type, tx, tz) {
+  const T0 = { clear: 1.5, drop: 1.0, smash: 0.5, serve: 1.3 }[type];
+  const sx = S.x, sy = Math.max(S.y, 0.3), sz = S.z;
+  let T = T0, vx, vy, vz;
+  for (let i = 0; i < 20; i++) {
+    vx = (tx - sx) / T; vz = (tz - sz) / T; vy = -sy / T + 0.5 * G * T;
+    if (type === 'smash') break;
+    const tn = (0 - sz) / vz; // 네트 도달 시간
+    const yn = sy + vy * tn - 0.5 * G * tn * tn;
+    if (tn <= 0 || yn > NET_H + 0.35) break;
+    T += 0.08;
+  }
+  S.vx = vx; S.vy = vy; S.vz = vz; S.last = side; S.fault = false; S.crossed = false;
+  shake = type === 'smash' ? 0.25 : 0.08;
+}
+
+function playerHit() {
+  const type = keys.KeyE ? 'smash' : keys.KeyQ ? 'drop' : 'clear';
+  const mx = (keys.ArrowLeft || keys.KeyA ? -1 : 0) + (keys.ArrowRight || keys.KeyD ? 1 : 0);
+  const tx = mx ? mx * 2.1 : -A.x * 0.9;
+  const tz = type === 'drop' ? -1.6 : type === 'smash' ? -4.2 : -5.9;
+  launch(1, type, tx, tz);
+}
+function aiHit() {
+  const err = () => (Math.random() - 0.5) * 1.4;
+  let type = 'clear';
+  const r = Math.random();
+  if (S.y > 2.4 && r < 0.4) type = 'smash';
+  else if (r < 0.3) type = 'drop';
+  const tx = Math.max(-2.3, Math.min(2.3, (P.x > 0 ? -1 : 1) * (0.8 + Math.random() * 1.5) + err() * 0.3));
+  const tz = type === 'drop' ? 1.6 + Math.random() : type === 'smash' ? 3.6 + Math.random() * 1.2 : 5.2 + Math.random() * 1.2;
+  launch(-1, type, tx, tz + err() * 0.3);
+}
+
+// 셔틀 착지 예측
+function predict(yTarget) {
+  let t = (S.vy + Math.sqrt(Math.max(0, S.vy * S.vy + 2 * G * (S.y - yTarget)))) / G;
+  return { x: S.x + S.vx * t, z: S.z + S.vz * t, t };
+}
+
+function score_(who, why) {
+  if (state !== 'rally') return;
+  if (who === 1) score.p++; else score.a++;
+  server = who; state = 'point'; stateT = 0;
+  msg = (who === 1 ? '득점! ' : '실점 ') + why; msgT = 1.6;
+  if (score.p >= WIN || score.a >= WIN) { state = 'over'; msg = score.p > score.a ? '🏆 승리!' : '😢 패배'; }
+}
+
+// ---- 업데이트 ----
+function update(dt) {
+  stateT += dt; P.cool -= dt; A.cool -= dt; P.swing = Math.max(0, P.swing - dt * 4); A.swing = Math.max(0, A.swing - dt * 4);
+  shake = Math.max(0, shake - dt);
+
+  if (state === 'title' || state === 'over') {
+    if ((press.Space || press.Enter) && stateT > 0.4) { score = { p: 0, a: 0 }; server = 1; resetServe(); }
+    return;
+  }
+  if (state === 'point') { if (stateT > 1.6) resetServe(); }
+
+  // 플레이어 이동
+  const sp = 5.2;
+  const mx = (keys.ArrowRight || keys.KeyD ? 1 : 0) - (keys.ArrowLeft || keys.KeyA ? 1 : 0);
+  const mz = (keys.ArrowDown || keys.KeyS ? 1 : 0) - (keys.ArrowUp || keys.KeyW ? 1 : 0);
+  P.x = Math.max(-HALF_W - 0.4, Math.min(HALF_W + 0.4, P.x + mx * sp * dt));
+  P.z = Math.max(1.0, Math.min(HALF_L, P.z + mz * sp * dt));
+
+  const swingKey = press.Space || press.KeyQ || press.KeyE;
+
+  if (state === 'serve') {
+    holdShuttle();
+    if (server === 1 && swingKey) {
+      P.swing = 1; state = 'rally'; launch(1, 'serve', A.x > 0 ? -1.2 : 1.2, -4.8);
+    } else if (server === -1 && stateT > 1.2) {
+      A.swing = 1; state = 'rally'; launch(-1, 'serve', P.x > 0 ? -1.2 : 1.2, 4.8);
+    }
+    aiMove(dt); return;
+  }
+
+  if (state === 'rally' || state === 'point') {
+    if (state === 'rally') {
+      // 플레이어 스윙
+      if (swingKey && P.cool <= 0) {
+        P.swing = 1; P.cool = 0.35;
+        const d = Math.hypot(S.x - (P.x + 0.3), S.y - 1.5, S.z - P.z);
+        if (d < 1.9 && S.last === -1) playerHit();
+      }
+      // AI
+      aiMove(dt);
+      if (S.last === 1 && S.vz < 0 || S.z < 0) {
+        if (A.cool <= 0 && S.last === 1 && S.crossed) {
+          const d = Math.hypot(S.x - (A.x + 0.3), S.y - 1.5, S.z - A.z);
+          if (d < 1.7 && Math.random() < 0.92) { A.swing = 1; A.cool = 0.5; aiHit(); }
+        }
+      }
+    }
+    // 셔틀 물리
+    const pz = S.z;
+    S.vy -= G * dt;
+    S.x += S.vx * dt; S.y += S.vy * dt; S.z += S.vz * dt;
+    S.trail.push([S.x, S.y, S.z]); if (S.trail.length > 14) S.trail.shift();
+    if (!S.crossed && (pz > 0) !== (S.z > 0)) {
+      S.crossed = true;
+      if (S.y < NET_H) { S.fault = true; S.vx *= 0.1; S.vz *= 0.05; }
+    }
+    // 서로 다시 넘어올 수 있도록
+    if (S.crossed && S.last === 1 && S.z > 0) S.crossed = false;
+    if (S.y <= 0.03 && S.vy < 0 && state === 'rally') {
+      S.y = 0.03; S.vx = S.vy = S.vz = 0;
+      const inB = Math.abs(S.x) <= HALF_W && Math.abs(S.z) <= HALF_L;
+      const landSide = S.z > 0 ? 1 : -1, other = -S.last;
+      let winner, why;
+      if (S.fault) { winner = other; why = '(네트)'; }
+      else if (inB && landSide === other) { winner = S.last; why = ''; }
+      else if (!inB) { winner = other; why = '(아웃)'; }
+      else { winner = other; why = '(자기 코트)'; }
+      if (S.last === 1 && winner === 1 && why === '') shake = 0.3;
+      score_(winner, why);
+    }
+  }
+}
+function aiMove(dt) {
+  let gx = 0, gz = -4.5, sp = 4.3;
+  if (state === 'rally' && S.last === 1) {
+    const p = predict(1.4);
+    gx = p.x; gz = Math.max(-6.2, Math.min(-0.9, p.z));
+  }
+  if (state === 'serve') { gx = server === -1 ? -1.3 : 0; }
+  const dx = gx - A.x, dz = gz - A.z, d = Math.hypot(dx, dz);
+  if (d > 0.05) { const m = Math.min(d, sp * dt); A.x += dx / d * m; A.z += dz / d * m; }
+}
+
+// ---- 렌더링 ----
+let cam = { x: 0, y: 2.7, z: 9.2, pitch: 0.24 };
+function proj(x, y, z) {
+  const dx = x - cam.x, dy = y - cam.y, dz = z - cam.z, c = Math.cos(cam.pitch), s = Math.sin(cam.pitch);
+  const depth = -dy * s - dz * c, up = dy * c - dz * s;
+  if (depth < 0.1) return null;
+  const k = F / depth;
+  return { x: W / 2 + dx * k + (shake ? (Math.random() - 0.5) * shake * 30 : 0), y: H / 2 - up * k + H * 0.06, k, depth };
+}
+function poly(pts, fill, stroke, lw) {
+  const q = pts.map(p => proj(...p)); if (q.some(v => !v)) return;
+  ctx.beginPath(); q.forEach((v, i) => i ? ctx.lineTo(v.x, v.y) : ctx.moveTo(v.x, v.y)); ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 2; ctx.stroke(); }
+}
+function line(a, b, col, w) {
+  const p = proj(...a), q = proj(...b); if (!p || !q) return;
+  ctx.strokeStyle = col; ctx.lineWidth = w * Math.min(p.k, q.k) * 0.5 + 0.5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+}
+function disc(x, y, z, r, col) {
+  const p = proj(x, y, z); if (!p) return;
+  ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(1, r * p.k), 0, 7); ctx.fill();
+}
+
+function drawPerson(o, col, back) {
+  const { x, z } = o, sw = o.swing;
+  // 그림자
+  const sh = proj(x, 0, z); if (sh) { ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(sh.x, sh.y, 0.4 * sh.k, 0.12 * sh.k, 0, 0, 7); ctx.fill(); }
+  const run = Math.sin(performance.now() / 90) * (o.moving ? 0.18 : 0);
+  line([x - 0.12, 0, z + run], [x - 0.1, 0.95, z], '#223', 0.2);
+  line([x + 0.12, 0, z - run], [x + 0.1, 0.95, z], '#223', 0.2);
+  line([x, 0.95, z], [x, 1.5, z], col, 0.46);
+  disc(x, 1.7, z, 0.15, '#f1c9a5');
+  if (back) disc(x, 1.72, z, 0.155, '#2b1b12'); else { disc(x, 1.76, z, 0.15, '#2b1b12'); disc(x, 1.7, z + 0.1, 0.14, '#f1c9a5'); }
+  // 팔 + 라켓
+  const dir = back ? -1 : 1;
+  const hx = x + 0.32, hy = 1.35 + sw * 0.5, hz = z + dir * (0.1 + sw * 0.5);
+  line([x + 0.2, 1.45, z], [hx, hy, hz], '#f1c9a5', 0.13);
+  const tx = hx + 0.05, ty = hy + 0.5 + sw * 0.25, tz = hz + dir * (0.15 + sw * 0.3);
+  line([hx, hy, hz], [tx, ty, tz], '#444', 0.05);
+  const c = proj(tx, ty + 0.12, tz);
+  if (c) {
+    ctx.strokeStyle = '#e33'; ctx.lineWidth = Math.max(1.5, 0.04 * c.k);
+    ctx.fillStyle = 'rgba(255,255,255,.25)';
+    ctx.beginPath(); ctx.ellipse(c.x, c.y, 0.13 * c.k, 0.17 * c.k, 0, 0, 7); ctx.fill(); ctx.stroke();
+  }
+  line([x - 0.2, 1.45, z], [x - 0.25, 1.05, z], '#f1c9a5', 0.13);
+}
+
+function draw() {
+  // 카메라: 선수 뒤에서 따라감
+  const tx = P.x * 0.65, tz = P.z + 5.0;
+  cam.x += (tx - cam.x) * 0.12; cam.z += (tz - cam.z) * 0.12;
+  cam.y = 3.0 + (P.z - 5) * 0.05;
+
+  // 체육관 배경
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1d2a44'); g.addColorStop(0.45, '#3a4d73'); g.addColorStop(0.46, '#6b4a2b'); g.addColorStop(1, '#4a301a');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // 먼 벽 패널
+  const wl = proj(-8, 0, -11), wr = proj(8, 6, -11);
+  if (wl && wr) { ctx.fillStyle = '#2b3b5c'; ctx.fillRect(wl.x, wr.y, wr.x - wl.x, wl.y - wr.y); ctx.fillStyle = '#e8c547'; ctx.fillRect(wl.x, wl.y - 0.4 * wl.k, wr.x - wl.x, 0.4 * wl.k); }
+  // 바닥 & 코트
+  poly([[-9, 0, 14], [9, 0, 14], [9, 0, -11], [-9, 0, -11]], '#a8743f');
+  poly([[-3.4, 0, -7.3], [3.4, 0, -7.3], [3.4, 0, 7.3], [-3.4, 0, 7.3]], '#2e8b57');
+  const L = (a, b) => line([a[0], 0.001, a[1]], [b[0], 0.001, b[1]], '#fff', 0.08);
+  L([-HALF_W, -HALF_L], [HALF_W, -HALF_L]); L([-HALF_W, HALF_L], [HALF_W, HALF_L]);
+  L([-HALF_W, -HALF_L], [-HALF_W, HALF_L]); L([HALF_W, -HALF_L], [HALF_W, HALF_L]);
+  L([0, -HALF_L], [0, -1.98]); L([0, 1.98], [0, HALF_L]);
+  L([-HALF_W, -1.98], [HALF_W, -1.98]); L([-HALF_W, 1.98], [HALF_W, 1.98]);
+  L([-HALF_W, -HALF_L + 0.76], [HALF_W, -HALF_L + 0.76]); L([-HALF_W, HALF_L - 0.76], [HALF_W, HALF_L - 0.76]);
+
+  const sorted = [];
+  // AI (네트 뒤)
+  drawPerson(Object.assign(A, { moving: state === 'rally' }), '#3b82f6', false);
+
+  // 셔틀 그림자 (네트보다 먼저)
+  const sh = proj(S.x, 0, S.z);
+  if (sh) { ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.ellipse(sh.x, sh.y, 0.14 * sh.k, 0.05 * sh.k, 0, 0, 7); ctx.fill(); }
+
+  // 네트
+  const NT = 1.55;
+  line([-3.05, 0, 0], [-3.05, NT + 0.05, 0], '#ddd', 0.1); line([3.05, 0, 0], [3.05, NT + 0.05, 0], '#ddd', 0.1);
+  ctx.globalAlpha = 0.55;
+  for (let i = -3.0; i <= 3.0; i += 0.2) line([i, 0.76, 0], [i, NT, 0], '#fff', 0.01);
+  for (let j = 0.8; j <= NT; j += 0.15) line([-3.05, j, 0], [3.05, j, 0], '#fff', 0.01);
+  ctx.globalAlpha = 1;
+  line([-3.05, NT, 0], [3.05, NT, 0], '#fff', 0.09);
+
+  // 셔틀콕
+  for (let i = 0; i < S.trail.length; i++) { const t = S.trail[i]; disc(t[0], t[1], t[2], 0.03 * i / 14, 'rgba(255,255,255,' + (i / 28) + ')'); }
+  const sp = proj(S.x, S.y, S.z);
+  if (sp) {
+    const v = Math.hypot(S.vx, S.vy, S.vz) || 1;
+    const bk = proj(S.x - S.vx / v * 0.28, S.y - S.vy / v * 0.28, S.z - S.vz / v * 0.28);
+    if (bk) {
+      ctx.strokeStyle = '#fff'; ctx.lineCap = 'round'; ctx.lineWidth = Math.max(3, 0.12 * sp.k); ctx.beginPath(); ctx.moveTo(sp.x, sp.y); ctx.lineTo(bk.x, bk.y); ctx.stroke();
+    }
+    ctx.fillStyle = '#f5d76e'; ctx.beginPath(); ctx.arc(sp.x, sp.y, Math.max(2.5, 0.045 * sp.k), 0, 7); ctx.fill();
+  }
+
+  // 플레이어 (뒷모습)
+  drawPerson(Object.assign(P, { moving: keys.ArrowLeft || keys.ArrowRight || keys.ArrowUp || keys.ArrowDown || keys.KeyA || keys.KeyD || keys.KeyW || keys.KeyS }), '#ef4444', true);
+
+  // HUD
+  ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(0,0,0,.45)';
+  const bw = W * 0.3; ctx.fillRect(W / 2 - bw / 2, 10, bw, H * 0.08);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + H * 0.055 + 'px system-ui';
+  ctx.fillText(`나 ${score.p}  :  ${score.a} AI`, W / 2, 10 + H * 0.058);
+  ctx.font = H * 0.025 + 'px system-ui'; ctx.fillStyle = '#ddd';
+  ctx.fillText(`${WIN}점 선취`, W / 2, 10 + H * 0.105);
+  if (state === 'serve' && server === 1) banner('스페이스 / 클리어 버튼으로 서브!');
+  if (state === 'point') banner(msg);
+  if (state === 'title') overlay('🏸 배드민턴 3D', '이동: 방향키/WASD  ·  Space 클리어 · Q 드롭 · E 스매시\n셔틀이 가까울 때 누르세요 (좌/우 키로 방향 조절)\n\nSpace 또는 화면 터치로 시작');
+  if (state === 'over') overlay(msg, `${score.p} : ${score.a}\nSpace 또는 터치로 다시 시작`);
+  for (const k in press) delete press[k];
+}
+function banner(t) {
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.font = 'bold ' + H * 0.04 + 'px system-ui';
+  const w = ctx.measureText(t).width + 40; ctx.fillRect(W / 2 - w / 2, H * 0.22, w, H * 0.07);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.fillText(t, W / 2, H * 0.22 + H * 0.05);
+}
+function overlay(title, body) {
+  ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = 'bold ' + H * 0.09 + 'px system-ui'; ctx.fillText(title, W / 2, H * 0.35);
+  ctx.font = H * 0.032 + 'px system-ui';
+  body.split('\n').forEach((l, i) => ctx.fillText(l, W / 2, H * 0.5 + i * H * 0.05));
+}
+
+let last = performance.now();
+function loop(t) {
+  const dt = Math.min(0.033, (t - last) / 1000); last = t;
+  update(dt); draw(); requestAnimationFrame(loop);
+}
+// 테스트용 훅
+window.__game = { S, P, A, get state() { return state; }, get score() { return score; }, keys, press };
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
